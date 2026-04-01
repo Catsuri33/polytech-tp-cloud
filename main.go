@@ -32,6 +32,13 @@ type Todo struct {
 	Created_At  *time.Time `json:"created_at"`
 }
 
+type UpdateTodo struct {
+	Title       *string    `json:"title"`
+	Description *string    `json:"description"`
+	Due_Date    *time.Time `json:"due_date"`
+	Status      *string    `json:"status"`
+}
+
 func Connect(connectionString string) (*pgx.Conn, error) {
 	conn, err := pgx.Connect(context.Background(), connectionString)
 	if err != nil {
@@ -108,6 +115,12 @@ func createTodo(c *gin.Context) {
 		return
 	}
 
+	status := todo.Status
+	if status == nil {
+		defaultStatus := "pending"
+		status = &defaultStatus
+	}
+
 	var id uint32
 	err := databaseConn.QueryRow(
 		context.Background(),
@@ -117,7 +130,7 @@ func createTodo(c *gin.Context) {
 		todo.Title,
 		todo.Description,
 		todo.Due_Date,
-		todo.Status,
+		status,
 	).Scan(&id)
 
 	if err != nil {
@@ -138,7 +151,7 @@ func editTodo(c *gin.Context) {
 		return
 	}
 
-	var todo Todo
+	var todo UpdateTodo
 	if err := c.ShouldBindJSON(&todo); err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
