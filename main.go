@@ -352,16 +352,20 @@ func main() {
 	if appName == "" {
 		appName = "My awesome API"
 	}
+	log.Printf("App: %s | Port: %s", appName, port)
 
 	// Connect to the database
+	log.Println("Connecting to database...")
 	var err error
 	databaseConn, err = Connect(connectionString)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	defer databaseConn.Close(context.Background())
+	log.Println("Database connected")
 
 	// Create type and table
+	log.Println("Running migrations...")
 	_, err = databaseConn.Exec(context.Background(), `
 		DO $$ BEGIN
 			CREATE TYPE status AS ENUM ('pending', 'done');
@@ -370,7 +374,7 @@ func main() {
 		END $$;
 	`)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to create type: %v", err)
 	}
 
 	_, err = databaseConn.Exec(context.Background(), `CREATE TABLE IF NOT EXISTS todos (
@@ -382,22 +386,31 @@ func main() {
 														created_at  TIMESTAMP NOT NULL DEFAULT NOW()
 													);`)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to create table: %v", err)
 	}
+	log.Println("Migrations done")
 
 	// Connect Redis
+	log.Println("Connecting to Redis...")
 	opt, err := redis.ParseURL(os.Getenv("REDIS_URL"))
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to parse Redis URL: %v", err)
 	}
 	redisClient = redis.NewClient(opt)
+	if err := redisClient.Ping(context.Background()).Err(); err != nil {
+		log.Fatalf("Failed to connect to Redis: %v", err)
+	}
+	log.Println("Redis connected")
 
 	// Goroutine for alerts
 	go func() {
+		log.Println("Subscribing to Redis channel todo_alerts...")
 		sub := redisClient.Subscribe(context.Background(), "todo_alerts")
 		ch := sub.Channel()
+		log.Println("Subscribed to Redis channel todo_alerts")
 		for msg := range ch {
 			clientsMu.Lock()
+			log.Printf("Broadcasting alert to %d clients", len(clients))
 			for client := range clients {
 				client <- msg.Payload
 			}
@@ -406,6 +419,7 @@ func main() {
 	}()
 
 	// Start the server
+	log.Printf("Starting server on 0.0.0.0:%s", port)
 	router := gin.Default()
 	router.GET("/health", getHealth)
 	router.GET("/todos", getTodos)
