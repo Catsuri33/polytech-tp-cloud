@@ -397,5 +397,5 @@ func main() {
 	router.GET("/todos/overdue", getOverdueTodos)
 	router.GET("/alerts", alerts)
 	router.POST("/todos/:id/notify", notify)
-	router.Run(":" + port)
+	router.Run("0.0.0.0:" + port)
 }
