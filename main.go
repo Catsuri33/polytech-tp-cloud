@@ -7,15 +7,19 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
+	"github.com/redis/go-redis/v9"
 )
 
 var appName string
 var connectionString string
 var databaseConn *pgx.Conn
+var redisClient *redis.Client
+var clientsMu sync.Mutex
 var clients = make(map[chan string]bool)
 var broadcast = make(chan string)
 
@@ -242,10 +246,14 @@ func alerts(c *gin.Context) {
 
 	clientChan := make(chan string)
 
+	clientsMu.Lock()
 	clients[clientChan] = true
+	clientsMu.Unlock()
 
 	defer func() {
+		clientsMu.Lock()
 		delete(clients, clientChan)
+		clientsMu.Unlock()
 		close(clientChan)
 	}()
 
@@ -325,7 +333,7 @@ func notify(c *gin.Context) {
 		}(),
 	)
 
-	broadcast <- payload
+	redisClient.Publish(context.Background(), "todo_alerts", payload)
 
 	c.JSON(200, gin.H{
 		"message":   "Alerte envoyée",
@@ -377,13 +385,23 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Connect Redis
+	opt, err := redis.ParseURL(os.Getenv("REDIS_ADDON_URI"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	redisClient = redis.NewClient(opt)
+
 	// Goroutine for alerts
 	go func() {
-		for {
-			msg := <-broadcast
+		sub := redisClient.Subscribe(context.Background(), "todo_alerts")
+		ch := sub.Channel()
+		for msg := range ch {
+			clientsMu.Lock()
 			for client := range clients {
-				client <- msg
+				client <- msg.Payload
 			}
+			clientsMu.Unlock()
 		}
 	}()
 

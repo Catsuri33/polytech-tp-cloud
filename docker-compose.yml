@@ -12,6 +12,11 @@ services:
     networks:
       - backend
 
+  redis:
+    image: redis:alpine
+    networks:
+      - backend
+
   web:
     build: .
     container_name: web
@@ -20,6 +25,7 @@ services:
       - "${PORT:-3000}:3000"
     environment:
       - POSTGRESQL_ADDON_URI=${POSTGRESQL_ADDON_URI:?Vérifiez le .env}
+      - REDIS_ADDON_URI=${REDIS_ADDON_URI:?Vérifiez le .env}
       - PORT=3000
       - APP_NAME=Louis
     volumes:
@@ -28,6 +34,7 @@ services:
       - backend
     depends_on:
       - db
+      - redis
 
 volumes:
   postgres_data:
