@@ -346,7 +346,8 @@ func main() {
 	}
 
 	// Connect to the database
-	databaseConn, err := Connect(connectionString)
+	var err error
+	databaseConn, err = Connect(connectionString)
 	if err != nil {
 		log.Fatal(err)
 	}
