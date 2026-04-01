@@ -386,7 +386,7 @@ func main() {
 	}
 
 	// Connect Redis
-	opt, err := redis.ParseURL(os.Getenv("REDIS_ADDON_URI"))
+	opt, err := redis.ParseURL(os.Getenv("REDIS_URL"))
 	if err != nil {
 		log.Fatal(err)
 	}
