@@ -2,6 +2,8 @@
 
 Une API REST de gestion de tâches (todos) construite avec Go et Gin, avec support des alertes en temps réel via Server-Sent Events.
 
+Le dossier `vendor` est présent pour éviter de re-télécharger les librairies à chaque déploiement sur Clever Cloud.
+
 ## Auteur
 
 Louis Michault DO3
