@@ -40,7 +40,6 @@ func getHealth(c *gin.Context) {
 
 	databaseRes := "disconnected"
 	if databaseConn != nil {
-		"database": 
 		databaseRes = "connected"
 	}
 
@@ -306,9 +305,24 @@ func notify(c *gin.Context) {
 	payload := fmt.Sprintf(
 		`{"id": %d, "title": "%s", "status": "%s", "due_date": "%s"}`,
 		todo.ID,
-		derefString(todo.Title),
-		derefString(todo.Status),
-		formatDate(todo.Due_Date),
+		func() string {
+			if todo.Title == nil {
+				return ""
+			}
+			return *todo.Title
+		}(),
+		func() string {
+			if todo.Status == nil {
+				return ""
+			}
+			return *todo.Status
+		}(),
+		func() string {
+			if todo.Due_Date == nil {
+				return ""
+			}
+			return todo.Due_Date.Format("2006-01-02")
+		}(),
 	)
 
 	broadcast <- payload
@@ -339,24 +353,28 @@ func main() {
 	defer databaseConn.Close(context.Background())
 
 	// Create type and table
-	rows, err := databaseConn.Query(context.Background(), "CREATE TYPE IF NOT EXISTS status AS ENUM ('pending', 'done');")
+	_, err = databaseConn.Exec(context.Background(), `
+		DO $$ BEGIN
+			CREATE TYPE status AS ENUM ('pending', 'done');
+		EXCEPTION
+			WHEN duplicate_object THEN NULL;
+		END $$;
+	`)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer rows.Close()
 
-	rows, err = databaseConn.Query(context.Background(), `CREATE TABLE IF NOT EXISTS todos (
+	_, err = databaseConn.Exec(context.Background(), `CREATE TABLE IF NOT EXISTS todos (
 														id          SERIAL PRIMARY KEY,
 														title       VARCHAR(60) NOT NULL,
 														description VARCHAR(255) NULL,
 														due_date    DATE NULL,
-														status	  status NOT NULL DEFAULT 'pending'
-														created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+														status	  status NOT NULL DEFAULT 'pending',
+														created_at  TIMESTAMP NOT NULL DEFAULT NOW()
 													);`)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer rows.Close()
 
 	// Goroutine for alerts
 	go func() {
@@ -378,5 +396,5 @@ func main() {
 	router.GET("/todos/overdue", getOverdueTodos)
 	router.GET("/alerts", alerts)
 	router.POST("/todos/:id/notify", notify)
-	router.Run("localhost:" + port)
+	router.Run(":" + port)
 }

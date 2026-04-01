@@ -1,28 +1,29 @@
 services:
   db:
     image: postgres:latest
-    container_name: city-db
+    container_name: db
     restart: always
     environment:
-      - POSTGRES_USER=${CITY_API_DB_USER:?Vérifiez le .env}
-      - POSTGRES_PASSWORD=${CITY_API_DB_PWD?=Vérifiez le .env}
-      - POSTGRES_DB=${CITY_API_DB_NAME?=Vérifiez le .env}
+      - POSTGRES_USER=${POSTGRES_USER:?Vérifiez le .env}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Vérifiez le .env}
+      - POSTGRES_DB=${POSTGRES_DB:?Vérifiez le .env}
     volumes:
       - postgres_data:/var/lib/postgresql
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     networks:
       - backend
 
   web:
     build: .
-    container_name: city-web
+    container_name: web
     restart: always
     ports:
-      - ${CITY_API_ADDR:-127.0.0.1}:${CITY_API_PORT:-2022}:8080
+      - "${PORT:-3000}:3000"
     environment:
-      - DB_CONN_STRING=postgresql://${CITY_API_DB_USER:?Vérifiez le .env}:${CITY_API_DB_PWD:?Vérifiez le .env}@${CITY_API_DB_URL:?Vérifiez le .env}/${CITY_API_DB_NAME?=Vérifiez le .env}
+      - POSTGRESQL_ADDON_URI=${POSTGRESQL_ADDON_URI:?Vérifiez le .env}
+      - PORT=3000
+      - APP_NAME=Louis
     volumes:
-      - ./backend:/app
+      - ./:/app
     networks:
       - backend
     depends_on:
