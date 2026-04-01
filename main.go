@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,357 +10,430 @@ import (
 	"sync"
 	"time"
 
-	"github.com/joho/godotenv"
-	_ "github.com/lib/pq"
+	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 )
 
-var (
-	appName string
-	db      *sql.DB
-
-	redisClient *redis.Client
-
-	clientsMu sync.Mutex
-	clients   = make(map[chan string]bool)
-)
-
-// ----------------------
-// Models
-// ----------------------
+var appName string
+var connectionString string
+var databaseConn *pgx.Conn
+var redisClient *redis.Client
+var clientsMu sync.Mutex
+var clients = make(map[chan string]bool)
+var broadcast = make(chan string)
 
 type Todo struct {
 	ID          uint32     `json:"id"`
-	Title       *string    `json:"title"`
+	Title       *string    `json:"title" binding:"required"`
 	Description *string    `json:"description"`
-	DueDate     *time.Time `json:"due_date"`
+	Due_Date    *time.Time `json:"due_date"`
 	Status      *string    `json:"status"`
-	CreatedAt   *time.Time `json:"created_at"`
+	Created_At  *time.Time `json:"created_at"`
 }
 
-// ----------------------
-// Helpers
-// ----------------------
-
-func jsonResponse(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+func Connect(connectionString string) (*pgx.Conn, error) {
+	conn, err := pgx.Connect(context.Background(), connectionString)
+	if err != nil {
+		return nil, err
+	}
+	return conn, nil
 }
 
-// ----------------------
-// Handlers
-// ----------------------
+func getHealth(c *gin.Context) {
 
-func getHealth(w http.ResponseWriter, r *http.Request) {
-	dbStatus := "disconnected"
-	if db != nil {
-		dbStatus = "connected"
+	databaseRes := "disconnected"
+	if databaseConn != nil {
+		databaseRes = "connected"
 	}
 
-	jsonResponse(w, 200, map[string]string{
+	c.JSON(200, gin.H{
 		"status":   "ok",
 		"app":      appName,
-		"database": dbStatus,
+		"database": databaseRes,
 	})
 }
 
-func getTodos(w http.ResponseWriter, r *http.Request) {
-	status := r.URL.Query().Get("status")
+func getTodos(c *gin.Context) {
+	status := c.Query("status")
 
-	var (
-		rows *sql.Rows
-		err  error
-	)
+	var rows pgx.Rows
+	var err error
 
 	if status != "" {
-		rows, err = db.Query(`SELECT id, title, description, due_date, status, created_at FROM todos WHERE status=$1`, status)
+		rows, err = databaseConn.Query(
+			context.Background(),
+			"SELECT * FROM todos WHERE status = $1",
+			status,
+		)
 	} else {
-		rows, err = db.Query(`SELECT id, title, description, due_date, status, created_at FROM todos`)
+		rows, err = databaseConn.Query(
+			context.Background(),
+			"SELECT * FROM todos",
+		)
 	}
 
 	if err != nil {
-		jsonResponse(w, 500, map[string]string{"error": err.Error()})
+		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 	defer rows.Close()
 
 	var todos []Todo
 	for rows.Next() {
-		var t Todo
-		if err := rows.Scan(&t.ID, &t.Title, &t.Description, &t.DueDate, &t.Status, &t.CreatedAt); err != nil {
-			jsonResponse(w, 500, map[string]string{"error": err.Error()})
+		var todo Todo
+		err := rows.Scan(
+			&todo.ID,
+			&todo.Title,
+			&todo.Description,
+			&todo.Due_Date,
+			&todo.Status,
+			&todo.Created_At,
+		)
+		if err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
 			return
 		}
-		todos = append(todos, t)
+		todos = append(todos, todo)
 	}
 
-	if todos == nil {
-		todos = []Todo{}
-	}
-
-	jsonResponse(w, 200, todos)
+	c.JSON(200, todos)
 }
 
-func createTodo(w http.ResponseWriter, r *http.Request) {
-	var t Todo
-	if err := json.NewDecoder(r.Body).Decode(&t); err != nil || t.Title == nil {
-		jsonResponse(w, 400, map[string]string{"error": "title required"})
+func createTodo(c *gin.Context) {
+	var todo Todo
+
+	if err := c.ShouldBindJSON(&todo); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
 
-	var id int
-	err := db.QueryRow(
+	var id uint32
+	err := databaseConn.QueryRow(
+		context.Background(),
 		`INSERT INTO todos (title, description, due_date, status)
-		 VALUES ($1,$2,$3,$4) RETURNING id`,
-		t.Title, t.Description, t.DueDate, t.Status,
+		 VALUES ($1, $2, $3, $4)
+		 RETURNING id`,
+		todo.Title,
+		todo.Description,
+		todo.Due_Date,
+		todo.Status,
 	).Scan(&id)
 
 	if err != nil {
-		jsonResponse(w, 500, map[string]string{"error": err.Error()})
+		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	t.ID = uint32(id)
-	jsonResponse(w, 201, t)
+	todo.ID = id
+	c.JSON(201, todo)
 }
 
-func editTodo(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("id"))
+func editTodo(c *gin.Context) {
+	idParam := c.Param("id")
+
+	id, err := strconv.Atoi(idParam)
 	if err != nil {
-		jsonResponse(w, 400, map[string]string{"error": "invalid id"})
+		c.JSON(400, gin.H{"error": "invalid id"})
 		return
 	}
 
-	var t Todo
-	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
-		jsonResponse(w, 400, map[string]string{"error": err.Error()})
+	var todo Todo
+	if err := c.ShouldBindJSON(&todo); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
 
-	res, err := db.Exec(`
-		UPDATE todos
-		SET title = COALESCE($1, title),
-			description = COALESCE($2, description),
-			due_date = COALESCE($3, due_date),
-			status = COALESCE($4, status)
-		WHERE id=$5
-	`, t.Title, t.Description, t.DueDate, t.Status, id)
+	cmdTag, err := databaseConn.Exec(
+		context.Background(),
+		`UPDATE todos
+		 SET title = COALESCE($1, title),
+		     description = COALESCE($2, description),
+		     due_date = COALESCE($3, due_date),
+		     status = COALESCE($4, status)
+		 WHERE id = $5`,
+		todo.Title,
+		todo.Description,
+		todo.Due_Date,
+		todo.Status,
+		id,
+	)
 
 	if err != nil {
-		jsonResponse(w, 500, map[string]string{"error": err.Error()})
+		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	affected, _ := res.RowsAffected()
-	if affected == 0 {
-		jsonResponse(w, 404, map[string]string{"error": "todo not found"})
+	if cmdTag.RowsAffected() == 0 {
+		c.JSON(404, gin.H{"error": "todo not found"})
 		return
 	}
 
-	jsonResponse(w, 200, map[string]string{"message": "updated"})
+	c.JSON(200, gin.H{"message": "todo updated"})
 }
 
-func deleteTodo(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("id"))
+func deleteTodo(c *gin.Context) {
+	idParam := c.Param("id")
+
+	id, err := strconv.Atoi(idParam)
 	if err != nil {
-		jsonResponse(w, 400, map[string]string{"error": "invalid id"})
+		c.JSON(400, gin.H{"error": "invalid id"})
 		return
 	}
 
-	res, err := db.Exec(`DELETE FROM todos WHERE id=$1`, id)
+	cmdTag, err := databaseConn.Exec(
+		context.Background(),
+		"DELETE FROM todos WHERE id = $1",
+		id,
+	)
+
 	if err != nil {
-		jsonResponse(w, 500, map[string]string{"error": err.Error()})
+		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	affected, _ := res.RowsAffected()
-	if affected == 0 {
-		jsonResponse(w, 404, map[string]string{"error": "not found"})
+	if cmdTag.RowsAffected() == 0 {
+		c.JSON(404, gin.H{"error": "todo not found"})
 		return
 	}
 
-	w.WriteHeader(204)
+	c.Status(204)
 }
 
-func getOverdueTodos(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Query(`
-		SELECT id, title, description, due_date, status, created_at
-		FROM todos
-		WHERE due_date < NOW() AND status != 'done'
-	`)
+func getOverdueTodos(c *gin.Context) {
+	rows, err := databaseConn.Query(
+		context.Background(),
+		"SELECT * FROM todos WHERE due_date < NOW() AND status != 'done'",
+	)
+
 	if err != nil {
-		jsonResponse(w, 500, map[string]string{"error": err.Error()})
+		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 	defer rows.Close()
 
 	var todos []Todo
 	for rows.Next() {
-		var t Todo
-		if err := rows.Scan(&t.ID, &t.Title, &t.Description, &t.DueDate, &t.Status, &t.CreatedAt); err != nil {
-			jsonResponse(w, 500, map[string]string{"error": err.Error()})
+		var todo Todo
+		err := rows.Scan(
+			&todo.ID,
+			&todo.Title,
+			&todo.Description,
+			&todo.Due_Date,
+			&todo.Status,
+			&todo.Created_At,
+		)
+		if err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
 			return
 		}
-		todos = append(todos, t)
+		todos = append(todos, todo)
 	}
 
-	if todos == nil {
-		todos = []Todo{}
-	}
-
-	jsonResponse(w, 200, todos)
+	c.JSON(200, todos)
 }
 
-// ----------------------
-// SSE alerts
-// ----------------------
+func alerts(c *gin.Context) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
 
-func alerts(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	flusher, ok := w.(http.Flusher)
+	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
-		jsonResponse(w, 500, map[string]string{"error": "stream not supported"})
+		c.JSON(500, gin.H{"error": "streaming unsupported"})
 		return
 	}
 
-	ch := make(chan string)
+	clientChan := make(chan string)
 
 	clientsMu.Lock()
-	clients[ch] = true
+	clients[clientChan] = true
 	clientsMu.Unlock()
 
 	defer func() {
 		clientsMu.Lock()
-		delete(clients, ch)
+		delete(clients, clientChan)
 		clientsMu.Unlock()
-		close(ch)
+		close(clientChan)
 	}()
 
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
+	pingTicker := time.NewTicker(30 * time.Second)
+	defer pingTicker.Stop()
 
-	ctx := r.Context()
+	clientGone := c.Request.Context().Done()
 
 	for {
 		select {
-		case <-ctx.Done():
+
+		case <-clientGone:
 			return
-		case msg := <-ch:
-			fmt.Fprintf(w, "event: todo_alert\n")
-			fmt.Fprintf(w, "data: %s\n\n", msg)
+
+		case msg := <-clientChan:
+			fmt.Fprintf(c.Writer, "event: todo_alert\n")
+			fmt.Fprintf(c.Writer, "data: %s\n\n", msg)
 			flusher.Flush()
-		case <-ticker.C:
-			fmt.Fprintf(w, "event: ping\n")
-			fmt.Fprintf(w, "data: {}\n\n")
+
+		case <-pingTicker.C:
+			fmt.Fprintf(c.Writer, "event: ping\n")
+			fmt.Fprintf(c.Writer, "data: {}\n\n")
 			flusher.Flush()
 		}
 	}
 }
 
-func notify(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("id"))
+func notify(c *gin.Context) {
+	idParam := c.Param("id")
+
+	id, err := strconv.Atoi(idParam)
 	if err != nil {
-		jsonResponse(w, 400, map[string]string{"error": "invalid id"})
+		c.JSON(400, gin.H{"error": "invalid id"})
 		return
 	}
 
-	var t Todo
-	err = db.QueryRow(`
-		SELECT id, title, description, due_date, status, created_at
-		FROM todos WHERE id=$1
-	`, id).Scan(&t.ID, &t.Title, &t.Description, &t.DueDate, &t.Status, &t.CreatedAt)
+	var todo Todo
+	err = databaseConn.QueryRow(
+		context.Background(),
+		`SELECT id, title, description, due_date, status, created_at
+		 FROM todos WHERE id=$1`,
+		id,
+	).Scan(
+		&todo.ID,
+		&todo.Title,
+		&todo.Description,
+		&todo.Due_Date,
+		&todo.Status,
+		&todo.Created_At,
+	)
 
 	if err != nil {
-		jsonResponse(w, 404, map[string]string{"error": "not found"})
+		c.JSON(404, gin.H{"error": "todo not found"})
 		return
 	}
 
-	payload := fmt.Sprintf(`{"id":%d,"title":"%s","status":"%s"}`, t.ID, deref(t.Title), deref(t.Status))
+	payload := fmt.Sprintf(
+		`{"id": %d, "title": "%s", "status": "%s", "due_date": "%s"}`,
+		todo.ID,
+		func() string {
+			if todo.Title == nil {
+				return ""
+			}
+			return *todo.Title
+		}(),
+		func() string {
+			if todo.Status == nil {
+				return ""
+			}
+			return *todo.Status
+		}(),
+		func() string {
+			if todo.Due_Date == nil {
+				return ""
+			}
+			return todo.Due_Date.Format("2006-01-02")
+		}(),
+	)
 
 	redisClient.Publish(context.Background(), "todo_alerts", payload)
 
-	clientsMu.Lock()
-	nb := len(clients)
-	clientsMu.Unlock()
-
-	jsonResponse(w, 200, map[string]any{
-		"message":   "sent",
-		"listeners": nb,
+	c.JSON(200, gin.H{
+		"message":   "Alerte envoyée",
+		"listeners": len(clients),
 	})
 }
 
-func deref(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
-}
-
-// ----------------------
-// main
-// ----------------------
-
 func main() {
-	_ = godotenv.Load()
+	log.Println("STARTING MAIN LOOP")
 
+	// Get environment variables
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	connectionString = os.Getenv("POSTGRESQL_ADDON_URI")
 	appName = os.Getenv("APP_NAME")
 	if appName == "" {
-		appName = "Todo API"
+		appName = "My awesome API"
 	}
+	log.Printf("App: %s | Port: %s", appName, port)
 
-	dsn := os.Getenv("DATABASE_URL")
-
+	// Connect to the database
+	log.Println("Connecting to database...")
 	var err error
-	db, err = sql.Open("postgres", dsn)
+	databaseConn, err = Connect(connectionString)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to connect to database: %v", err)
 	}
+	defer databaseConn.Close(context.Background())
+	log.Println("Database connected")
 
-	if err := db.Ping(); err != nil {
-		log.Fatal(err)
-	}
-
-	redisOpt, err := redis.ParseURL(os.Getenv("REDIS_URL"))
+	// Create type and table
+	log.Println("Running migrations...")
+	_, err = databaseConn.Exec(context.Background(), `
+		DO $$ BEGIN
+			CREATE TYPE status AS ENUM ('pending', 'done');
+		EXCEPTION
+			WHEN duplicate_object THEN NULL;
+		END $$;
+	`)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to create type: %v", err)
 	}
 
-	redisClient = redis.NewClient(redisOpt)
+	_, err = databaseConn.Exec(context.Background(), `CREATE TABLE IF NOT EXISTS todos (
+														id          SERIAL PRIMARY KEY,
+														title       VARCHAR(60) NOT NULL,
+														description VARCHAR(255) NULL,
+														due_date    DATE NULL,
+														status	  status NOT NULL DEFAULT 'pending',
+														created_at  TIMESTAMP NOT NULL DEFAULT NOW()
+													);`)
+	if err != nil {
+		log.Fatalf("Failed to create table: %v", err)
+	}
+	log.Println("Migrations done")
+
+	// Connect Redis
+	log.Println("Connecting to Redis...")
+	opt, err := redis.ParseURL(os.Getenv("REDIS_URL"))
+	if err != nil {
+		log.Fatalf("Failed to parse Redis URL: %v", err)
+	}
+	redisClient = redis.NewClient(opt)
 	if err := redisClient.Ping(context.Background()).Err(); err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
+	log.Println("Redis connected")
 
-	// Redis subscriber -> broadcast to SSE clients
+	// Goroutine for alerts
 	go func() {
+		log.Println("Subscribing to Redis channel todo_alerts...")
 		sub := redisClient.Subscribe(context.Background(), "todo_alerts")
 		ch := sub.Channel()
-
+		log.Println("Subscribed to Redis channel todo_alerts")
 		for msg := range ch {
 			clientsMu.Lock()
-			for c := range clients {
-				select {
-				case c <- msg.Payload:
-				default:
-				}
+			log.Printf("Broadcasting alert to %d clients", len(clients))
+			for client := range clients {
+				client <- msg.Payload
 			}
 			clientsMu.Unlock()
 		}
 	}()
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", getHealth)
-	mux.HandleFunc("GET /todos", getTodos)
-	mux.HandleFunc("POST /todos", createTodo)
-	mux.HandleFunc("PATCH /todos/{id}", editTodo)
-	mux.HandleFunc("DELETE /todos/{id}", deleteTodo)
-	mux.HandleFunc("GET /todos/overdue", getOverdueTodos)
-	mux.HandleFunc("GET /alerts", alerts)
-	mux.HandleFunc("POST /todos/{id}/notify", notify)
-
-	log.Println("Server running on :8080")
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	// Start the server
+	log.Printf("Starting server on 0.0.0.0:%s", port)
+	router := gin.Default()
+	router.GET("/health", getHealth)
+	router.GET("/ping", func(c *gin.Context) {
+		log.Println("PING HIT")
+		c.JSON(200, gin.H{"pong": true})
+	})
+	router.GET("/todos", getTodos)
+	router.POST("/todos", createTodo)
+	router.PATCH("/todos/:id", editTodo)
+	router.DELETE("/todos/:id", deleteTodo)
+	router.GET("/todos/overdue", getOverdueTodos)
+	router.GET("/alerts", alerts)
+	router.POST("/todos/:id/notify", notify)
+	router.Run("0.0.0.0:" + port)
 }

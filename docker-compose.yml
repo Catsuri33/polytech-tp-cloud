@@ -1,0 +1,43 @@
+services:
+  db:
+    image: postgres:latest
+    container_name: db
+    restart: always
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:?Vérifiez le .env}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Vérifiez le .env}
+      - POSTGRES_DB=${POSTGRES_DB:?Vérifiez le .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    networks:
+      - backend
+
+  redis:
+    image: redis:alpine
+    networks:
+      - backend
+
+  web:
+    build: .
+    container_name: web
+    restart: always
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - POSTGRESQL_ADDON_URI=${POSTGRESQL_ADDON_URI:?Vérifiez le .env}
+      - REDIS_URL=${REDIS_URL:?Vérifiez le .env}
+      - PORT=3000
+      - APP_NAME=Louis
+    networks:
+      - backend
+    depends_on:
+      - db
+      - redis
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  backend:
+    driver: bridge
